@@ -1,0 +1,68 @@
+---
+# Called by Jenkins:  ansible-playbook -i "<k8s-ip>," deploy.yml -e image=<acr>.azurecr.io/devops-demo:<n>
+# ACR credentials arrive as environment variables (ACR_SERVER, ACR_CRED_USR, ACR_CRED_PSW) set by Jenkins.
+- name: Deploy application to Kubernetes
+  hosts: all
+  become: true
+  vars:
+    remote_dir: /opt/cia2-demo/k8s
+    acr_server: "{{ lookup('env', 'ACR_SERVER') }}"
+    acr_user: "{{ lookup('env', 'ACR_CRED_USR') }}"
+    acr_pass: "{{ lookup('env', 'ACR_CRED_PSW') }}"
+  tasks:
+    - name: Make sure target directory exists
+      ansible.builtin.file:
+        path: "{{ remote_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy Kubernetes manifests
+      ansible.builtin.copy:
+        src: ../k8s/
+        dest: "{{ remote_dir }}/"
+        mode: "0644"
+
+    - name: Inject the freshly built image into the Deployment manifest
+      ansible.builtin.replace:
+        path: "{{ remote_dir }}/deployment.yaml"
+        regexp: 'IMAGE_PLACEHOLDER'
+        replace: "{{ image }}"
+
+    - name: Create or refresh the image pull secret for Azure Container Registry
+      ansible.builtin.shell: |
+        k3s kubectl create secret docker-registry acr-secret --namespace cia2-demo \
+          --docker-server="$ACR_SERVER" --docker-username="$ACR_USER" --docker-password="$ACR_PASS" \
+          --dry-run=client -o yaml | k3s kubectl apply -f -
+      environment:
+        ACR_SERVER: "{{ acr_server }}"
+        ACR_USER: "{{ acr_user }}"
+        ACR_PASS: "{{ acr_pass }}"
+      no_log: true
+      changed_when: true
+
+    - name: Apply manifests
+      ansible.builtin.command: "k3s kubectl apply -f {{ remote_dir }}/"
+      register: apply
+      changed_when: "'configured' in apply.stdout or 'created' in apply.stdout"
+
+    - name: Wait for the rolling update to finish
+      ansible.builtin.command: k3s kubectl rollout status deployment/devops-demo -n cia2-demo --timeout=180s
+      changed_when: false
+
+    - name: Show pods
+      ansible.builtin.command: k3s kubectl get pods,svc -n cia2-demo -o wide
+      register: pods
+      changed_when: false
+
+    - name: Print pods and service
+      ansible.builtin.debug:
+        var: pods.stdout_lines
+
+    - name: Check the app answers on the NodePort
+      ansible.builtin.uri:
+        url: http://localhost:30080/health
+        status_code: 200
+      register: health
+      retries: 10
+      delay: 3
+      until: health.status == 200

@@ -1,0 +1,9 @@
+target/
+.idea/
+*.iml
+*.pem
+*.pub
+cia2-key
+ansible/inventory.ini
+.vscode/
+cia2-vars.json

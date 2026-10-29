@@ -1,0 +1,18 @@
+flowchart LR
+  Dev["Developer<br/>git push"] --> GH["GitHub<br/>Repository"]
+  GH -- "poll / webhook" --> J
+  subgraph AZ["Microsoft Azure (Resource group cia2-rg, one virtual network)"]
+    direction LR
+    subgraph VMA["VM: Jenkins server"]
+      J["Jenkins pipeline<br/>Maven + Docker + Ansible"]
+    end
+    ACR[("Azure Container Registry<br/>devops-demo:BUILD_NO")]
+    subgraph VMB["VM: Kubernetes node (k3s)"]
+      K["Deployment: 2 pods<br/>Service NodePort 30080"]
+    end
+    NSG["Network security group<br/>ports 22, 8080, 30080"]
+  end
+  J -- "docker push" --> ACR
+  J -- "ansible-playbook<br/>over SSH (private IP)" --> K
+  ACR -- "image pull" --> K
+  K --> User["User browser<br/>http://node-ip:30080"]

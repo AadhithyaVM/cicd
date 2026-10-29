@@ -1,0 +1,9 @@
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Jenkinsfile text eol=lf
+Dockerfile text eol=lf
+*.j2 text eol=lf
+*.groovy text eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf

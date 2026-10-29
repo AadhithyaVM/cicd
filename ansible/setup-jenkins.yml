@@ -1,0 +1,138 @@
+---
+# Fully automated Jenkins setup: installs Jenkins, skips the setup wizard, installs plugins,
+# creates the admin user, the credentials and the pipeline job, and starts the first build.
+# Extra vars (from cia2-vars.json): repo_url, repo_branch, jenkins_admin_password, acr_server, acr_user, acr_password
+- name: Configure Jenkins CI server
+  hosts: jenkins
+  become: true
+  vars:
+    repo_branch: main
+    jenkins_admin_password: "Cia2@Admin123"
+    k8s_private_ip: "{{ groups['k8s'][0] }}"
+    ssh_key_path: /home/ubuntu/.ssh/cia2-key.pem
+    plugins: >-
+      git workflow-aggregator github credentials-binding plain-credentials
+      ssh-credentials timestamper junit pipeline-stage-view
+  tasks:
+    - name: Install base packages
+      ansible.builtin.apt:
+        name: [openjdk-21-jdk, maven, docker.io, ansible, git, curl, ca-certificates, fontconfig]
+        update_cache: true
+        state: present
+
+    - name: Use Java 21 for Jenkins and Maven (the app itself still targets Java 17)
+      ansible.builtin.command: "update-alternatives --set {{ item }} /usr/lib/jvm/java-21-openjdk-amd64/bin/{{ item }}"
+      loop: [java, javac]
+      changed_when: false
+
+    - name: Add Jenkins apt signing key
+      ansible.builtin.get_url:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+        dest: /usr/share/keyrings/jenkins-keyring.asc
+        mode: "0644"
+
+    - name: Add Jenkins apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/"
+        filename: jenkins
+        state: present
+
+    - name: Install Jenkins
+      ansible.builtin.apt:
+        name: jenkins
+        update_cache: true
+        state: present
+
+    - name: Let jenkins user run Docker
+      ansible.builtin.user:
+        name: jenkins
+        groups: docker
+        append: true
+
+    - name: Enable and start Docker
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Make sure systemd drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system/jenkins.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Skip the Jenkins setup wizard (we configure everything by code)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/jenkins.service.d/override.conf
+        content: |
+          [Service]
+          Environment="JAVA_OPTS=-Djava.awt.headless=true -Djenkins.install.runSetupWizard=false"
+        mode: "0644"
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Start Jenkins
+      ansible.builtin.service:
+        name: jenkins
+        state: started
+        enabled: true
+
+    - name: Wait for Jenkins web UI
+      ansible.builtin.uri:
+        url: http://localhost:8080/login
+        status_code: [200, 403]
+      register: up
+      retries: 30
+      delay: 10
+      until: up.status in [200, 403]
+
+    - name: Check whether plugins are already installed
+      ansible.builtin.stat:
+        path: /var/lib/jenkins/plugins/workflow-aggregator.jpi
+      register: plugin_stat
+
+    - name: Download Jenkins CLI
+      ansible.builtin.get_url:
+        url: http://localhost:8080/jnlpJars/jenkins-cli.jar
+        dest: /opt/jenkins-cli.jar
+        mode: "0644"
+      when: not plugin_stat.stat.exists
+
+    - name: Install Jenkins plugins (retries until the update centre is reachable)
+      ansible.builtin.command: "java -jar /opt/jenkins-cli.jar -s http://localhost:8080/ install-plugin {{ plugins }}"
+      register: plug
+      retries: 8
+      delay: 20
+      until: plug.rc == 0
+      when: not plugin_stat.stat.exists
+
+    - name: Install init script (admin user, credentials, pipeline job, first build)
+      ansible.builtin.template:
+        src: jenkins-init.groovy.j2
+        dest: /var/lib/jenkins/init.groovy.d/01-setup.groovy
+        owner: jenkins
+        group: jenkins
+        mode: "0600"
+      vars:
+        ssh_key: "{{ lookup('file', ssh_key_path) }}"
+
+    - name: Restart Jenkins so plugins and init script load
+      ansible.builtin.service:
+        name: jenkins
+        state: restarted
+
+    - name: Wait for the pipeline job to be created
+      ansible.builtin.wait_for:
+        path: /var/lib/jenkins/jobs/cia2-pipeline/config.xml
+        timeout: 300
+
+    - name: Remove init script (it contained the SSH key)
+      ansible.builtin.file:
+        path: /var/lib/jenkins/init.groovy.d/01-setup.groovy
+        state: absent
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "Jenkins ready at http://<jenkins-public-ip>:8080  user=admin  password={{ jenkins_admin_password }}  (first build already started)"

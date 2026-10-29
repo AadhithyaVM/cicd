@@ -1,0 +1,10 @@
+# Example only - bootstrap-on-jenkins.sh writes the real inventory on the Jenkins VM.
+[jenkins]
+localhost ansible_connection=local
+
+[k8s]
+10.10.1.5            # private IP of the Kubernetes VM
+
+[all:vars]
+ansible_user=ubuntu
+ansible_ssh_private_key_file=/home/ubuntu/.ssh/cia2-key.pem

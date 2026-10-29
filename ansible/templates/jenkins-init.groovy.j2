@@ -1,0 +1,76 @@
+// Runs once at Jenkins start-up (init.groovy.d). Idempotent: does nothing if the job already exists.
+import jenkins.model.*
+import hudson.security.*
+import hudson.util.Secret
+import com.cloudbees.plugins.credentials.*
+import com.cloudbees.plugins.credentials.domains.*
+import com.cloudbees.jenkins.plugins.sshcredentials.impl.BasicSSHUserPrivateKey
+import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl
+import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl
+import org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl
+
+def j = Jenkins.get()
+if (j.getItem('cia2-pipeline') != null) { return }
+
+// 1. Admin user + security
+def realm = new HudsonPrivateSecurityRealm(false)
+realm.createAccount('admin', '{{ jenkins_admin_password }}')
+j.setSecurityRealm(realm)
+def strategy = new FullControlOnceLoggedInAuthorizationStrategy()
+strategy.setAllowAnonymousRead(false)
+j.setAuthorizationStrategy(strategy)
+
+// 2. Credentials used by the Jenkinsfile
+def store = SystemCredentialsProvider.getInstance().getStore()
+store.addCredentials(Domain.global(), new StringCredentialsImpl(
+    CredentialsScope.GLOBAL, 'k8s-host-ip', 'Kubernetes node private IP', Secret.fromString('{{ k8s_private_ip }}')))
+store.addCredentials(Domain.global(), new BasicSSHUserPrivateKey(
+    CredentialsScope.GLOBAL, 'k8s-ssh-key', 'ubuntu',
+    new BasicSSHUserPrivateKey.DirectEntryPrivateKeySource('''{{ ssh_key }}'''), '', 'SSH key for the Kubernetes node'))
+store.addCredentials(Domain.global(), new StringCredentialsImpl(
+    CredentialsScope.GLOBAL, 'acr-login-server', 'Azure Container Registry login server', Secret.fromString('{{ acr_server }}')))
+store.addCredentials(Domain.global(), new UsernamePasswordCredentialsImpl(
+    CredentialsScope.GLOBAL, 'acr-creds', 'Azure Container Registry login', '{{ acr_user }}', '{{ acr_password }}'))
+store.addCredentials(Domain.global(), new StringCredentialsImpl(
+    CredentialsScope.GLOBAL, 'acr-login-server', 'Azure Container Registry login server', Secret.fromString('{{ acr_server }}')))
+store.addCredentials(Domain.global(), new UsernamePasswordCredentialsImpl(
+    CredentialsScope.GLOBAL, 'acr-creds', 'Azure Container Registry login', '{{ acr_user }}', '{{ acr_password }}'))
+
+// 3. Pipeline job (Pipeline script from SCM)
+def xml = '''<flow-definition plugin="workflow-job">
+  <description>CIA 2 CI/CD pipeline</description>
+  <keepDependencies>false</keepDependencies>
+  <properties/>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition" plugin="workflow-cps">
+    <scm class="hudson.plugins.git.GitSCM" plugin="git">
+      <configVersion>2</configVersion>
+      <userRemoteConfigs>
+        <hudson.plugins.git.UserRemoteConfig>
+          <url>{{ repo_url }}</url>
+        </hudson.plugins.git.UserRemoteConfig>
+      </userRemoteConfigs>
+      <branches>
+        <hudson.plugins.git.BranchSpec>
+          <name>*/{{ repo_branch }}</name>
+        </hudson.plugins.git.BranchSpec>
+      </branches>
+      <doGenerateSubmoduleConfigurations>false</doGenerateSubmoduleConfigurations>
+      <submoduleCfg class="empty-list"/>
+      <extensions/>
+    </scm>
+    <scriptPath>Jenkinsfile</scriptPath>
+    <lightweight>true</lightweight>
+  </definition>
+  <triggers>
+    <hudson.triggers.SCMTrigger>
+      <spec>H/2 * * * *</spec>
+      <ignorePostCommitHooks>false</ignorePostCommitHooks>
+    </hudson.triggers.SCMTrigger>
+  </triggers>
+  <disabled>false</disabled>
+</flow-definition>'''
+def job = j.createProjectFromXML('cia2-pipeline', new ByteArrayInputStream(xml.getBytes('UTF-8')))
+j.save()
+
+// 4. Start the first build
+job.scheduleBuild2(10)

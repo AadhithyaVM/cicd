@@ -1,0 +1,15 @@
+.git
+.gitignore
+.idea
+*.iml
+docs
+ansible
+k8s
+scripts
+Jenkinsfile
+README.md
+src
+pom.xml
+# keep only the built jar from target/
+target/*
+!target/app.jar
