@@ -4,7 +4,7 @@ package com.cia2.app;
 public class GreetingService {
 
     /** Headline shown on the home page. Change this text to demo the pipeline (Deliverable 4). */
-    public static final String HEADLINE = "Hello from the CI/CD pipeline - version 1";
+    public static final String HEADLINE = "Hello from the CI/CD pipeline - version 1--aadhi";
 
     public String greet(String name) {
         if (name == null || name.isBlank()) {
