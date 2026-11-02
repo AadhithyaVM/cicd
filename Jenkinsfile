@@ -20,6 +20,8 @@ pipeline {
         K8S_HOST   = credentials('k8s-host-ip')        // Secret text: private IP of the Kubernetes VM
         ACR_SERVER = credentials('acr-login-server')   // Secret text: <name>.azurecr.io
         ACR_CRED   = credentials('acr-creds')          // Username/password of Azure Container Registry
+        // Pinned so `mvn sonar:sonar` works without a pluginGroups entry. Server URL + token come from withSonarQubeEnv.
+        SONAR_MVN  = 'org.sonarsource.scanner.maven:sonar-maven-plugin:5.0.0.4389'
     }
 
     stages {
@@ -43,6 +45,25 @@ pipeline {
             post {
                 always {
                     junit 'target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        // Static analysis: bugs, vulnerabilities, code smells, duplication and JaCoCo coverage.
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {      // name of the server configured in Jenkins (created by Ansible)
+                    sh 'mvn -B ${SONAR_MVN}:sonar'
+                }
+            }
+        }
+
+        // Blocks here until SonarQube calls the Jenkins webhook; a failed Quality Gate stops the pipeline
+        // BEFORE anything is built into an image or deployed.
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
                 }
             }
         }

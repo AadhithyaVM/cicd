@@ -8,3 +8,4 @@
 7. GitHub commit for the change
 8. Jenkins build #2 triggered by the push
 9. Registry with the new tag; browser showing version 2; `kubectl rollout history`
+10. SonarQube dashboard for CIA2 DevOps Demo (Quality Gate Passed, coverage, issues) and Jenkins Stage View showing the SonarQube Analysis + Quality Gate stages

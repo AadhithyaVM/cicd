@@ -13,6 +13,12 @@
   <properties>
     <maven.compiler.release>17</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+    <!-- SonarQube analysis (server URL and token are injected by Jenkins withSonarQubeEnv) -->
+    <sonar.projectKey>com.cia2:devops-demo</sonar.projectKey>
+    <sonar.projectName>CIA2 DevOps Demo</sonar.projectName>
+    <sonar.java.source>17</sonar.java.source>
+    <sonar.coverage.jacoco.xmlReportPaths>${project.build.directory}/site/jacoco/jacoco.xml</sonar.coverage.jacoco.xmlReportPaths>
   </properties>
 
   <dependencies>
@@ -48,6 +54,23 @@
             </manifest>
           </archive>
         </configuration>
+      </plugin>
+      <!-- Code coverage: agent runs with the unit tests, XML report is read by SonarQube -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>0.8.12</version>
+        <executions>
+          <execution>
+            <id>prepare-agent</id>
+            <goals><goal>prepare-agent</goal></goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>test</phase>
+            <goals><goal>report</goal></goals>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
   </build>

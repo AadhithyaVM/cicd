@@ -1,15 +1,16 @@
 # CIA 2 – End-to-End CI/CD Pipeline on Microsoft Azure
 
-Java web app → **Git/GitHub** → **Jenkins** → **Maven** (build + JUnit) → **Docker** → **Azure Container Registry** → **Ansible** → **Kubernetes (k3s on an Azure VM)** → browser.
+Java web app → **Git/GitHub** → **Jenkins** → **Maven** (build + JUnit + JaCoCo) → **SonarQube** (analysis + Quality Gate) → **Docker** → **Azure Container Registry** → **Ansible** → **Kubernetes (k3s on an Azure VM)** → browser.
 
 ```
 src/                      Java app + JUnit tests (9 tests)
 pom.xml                   Maven build (Java 17, JUnit 4, executable jar target/app.jar)
 Dockerfile, .dockerignore Container image (non-root, healthcheck)
-Jenkinsfile               checkout > package > test > docker build > push to ACR > ansible deploy > verify
+Jenkinsfile               checkout > package > test > SonarQube analysis > Quality Gate > docker build > push to ACR > ansible deploy > verify
 k8s/                      namespace, deployment (2 replicas, probes, rolling update), service (NodePort 30080)
 ansible/                  setup-k8s.yml, setup-jenkins.yml, deploy.yml (+ Jenkins init script template)
 scripts/                  bootstrap-on-jenkins.sh (runs on the Jenkins VM)
+                          (setup-jenkins.yml also runs SonarQube + PostgreSQL in Docker on the Jenkins VM, port 9000)
 docs/                     architecture diagram, screenshot checklist
 ```
 
@@ -73,6 +74,7 @@ az network nsg create --resource-group $RG --name cia2-nsg
 $MYIP = (Invoke-RestMethod https://api.ipify.org).Trim()
 az network nsg rule create --resource-group $RG --nsg-name cia2-nsg --name ssh     --priority 1000 --access Allow --protocol Tcp --direction Inbound --destination-port-ranges 22    --source-address-prefixes $MYIP
 az network nsg rule create --resource-group $RG --nsg-name cia2-nsg --name jenkins --priority 1010 --access Allow --protocol Tcp --direction Inbound --destination-port-ranges 8080
+az network nsg rule create --resource-group $RG --nsg-name cia2-nsg --name sonar   --priority 1015 --access Allow --protocol Tcp --direction Inbound --destination-port-ranges 9000  --source-address-prefixes $MYIP
 az network nsg rule create --resource-group $RG --nsg-name cia2-nsg --name app     --priority 1020 --access Allow --protocol Tcp --direction Inbound --destination-port-ranges 30080
 ```
 Traffic between the two VMs inside the virtual network is allowed by Azure's default rules (this is how Jenkins reaches Kubernetes).
@@ -123,9 +125,10 @@ Ansible installs k3s (Kubernetes) on the second VM, then installs Jenkins on thi
 ## Step 9 – See it running
 ```powershell
 "Jenkins:  http://${J_PUB}:8080     (user: admin, password: Cia2@Admin123)"
+"SonarQube: http://${J_PUB}:9000    (user: admin, password: Cia2@Sonar12345)"
 "App:      http://${K_PUB}:30080"
 ```
-Open Jenkins → `cia2-pipeline` → build #1 should turn green (about 3–5 minutes). Then open the app URL: *"Hello from the CI/CD pipeline - version 1"*.
+Open Jenkins → `cia2-pipeline` → build #1 should turn green (about 5–8 minutes; SonarQube's very first start adds a few minutes to Step 8). After the *SonarQube Analysis* stage, the project **CIA2 DevOps Demo** appears in the SonarQube dashboard. Then open the app URL: *"Hello from the CI/CD pipeline - version 1"*.
 
 ## Step 10 – Change and redeploy (the demo)
 Edit `HEADLINE` in `src/main/java/com/cia2/app/GreetingService.java`, then:
@@ -146,6 +149,16 @@ ssh -i $KEY ubuntu@$K_PUB "sudo k3s kubectl get deploy,pods,svc -n cia2-demo -o 
 ssh -i $KEY ubuntu@$K_PUB "sudo k3s kubectl rollout history deployment/devops-demo -n cia2-demo"
 ```
 Also take screenshots of the Azure Portal (resource group, registry repository), Jenkins Stage View and the browser (see `docs/SCREENSHOT_CHECKLIST.md`).
+
+## SonarQube (code quality gate)
+Ansible starts SonarQube Community Build (Docker, PostgreSQL) on the Jenkins VM, changes the default `admin/admin` password, creates an analysis token and a webhook, and registers server **SonarQube** + credential `sonar-token` in Jenkins. The pipeline then runs:
+
+`Unit Tests (JaCoCo coverage)` → `SonarQube Analysis` (`mvn sonar:sonar`) → `Quality Gate` (waits for the result; **fails the build if the gate fails, so nothing gets built or deployed**).
+
+- Open `http://<J_PUB>:9000`, project **CIA2 DevOps Demo**: bugs, vulnerabilities, code smells, coverage, duplication.
+- The gate is SonarQube's default **Sonar way** (coverage on new code ≥ 80%, no new bugs/vulnerabilities, etc.). Adjust it under *Quality Gates* in the SonarQube UI.
+- Change the passwords by adding `sonar_admin_password` / `sonar_db_password` to `cia2-vars.json` before step 8 (admin password needs 12+ characters).
+- Already provisioned? Re-run `ansible-playbook -i inventory.ini setup-jenkins.yml -e @cia2-vars.json` on the Jenkins VM (this needs the vars file again), open port 9000 (step 5 rule) and push the new Jenkinsfile.
 
 ## Pause, resume, delete
 ```powershell
@@ -182,4 +195,8 @@ java -jar target/app.jar     # http://localhost:8080
 | `Permissions ... too open` on the key | Re-run the two `icacls` lines in step 7 |
 | Jenkins build fails at *Push to Azure Container Registry* | Check `acr_user` / `acr_password` in the vars file; `az acr credential show --name $ACR` |
 | Pods `ImagePullBackOff` | The deploy stage recreates the `acr-secret`; re-run the build |
+| `vm.max_map_count` / SonarQube container keeps restarting | `sudo sysctl -w vm.max_map_count=524288`, then `docker restart sonarqube`; check `docker logs sonarqube` |
+| Build hangs at *Quality Gate* until timeout | Webhook not reaching Jenkins: SonarQube → Administration → Configuration → Webhooks, `jenkins` should be `http://host.docker.internal:8080/sonarqube-webhook/` and show a 200 delivery |
+| *Quality Gate* fails on coverage | Expected on a small project with new-code coverage < 80%: add tests or relax the gate in SonarQube |
+| SonarQube page unreachable | Port 9000 rule (step 5) only allows your IP; update it like the SSH rule if your IP changed |
 | Build does not start after `git push` | Click **Build Now**; polling runs every 2 minutes |

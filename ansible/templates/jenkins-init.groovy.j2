@@ -1,4 +1,5 @@
-// Runs once at Jenkins start-up (init.groovy.d). Idempotent: does nothing if the job already exists.
+// Runs at Jenkins start-up (init.groovy.d). Idempotent: users, credentials and the job are created only once;
+// the SonarQube integration (token credential + server entry) is refreshed on every run.
 import jenkins.model.*
 import hudson.security.*
 import hudson.util.Secret
@@ -6,11 +7,33 @@ import com.cloudbees.plugins.credentials.*
 import com.cloudbees.plugins.credentials.domains.*
 import com.cloudbees.jenkins.plugins.sshcredentials.impl.BasicSSHUserPrivateKey
 import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl
-import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl
 import org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl
 
 def j = Jenkins.get()
-if (j.getItem('cia2-pipeline') != null) { return }
+def store = SystemCredentialsProvider.getInstance().getStore()
+
+// 0. SonarQube integration (runs every time so an existing Jenkins gets it too)
+def sonarCred = new StringCredentialsImpl(
+    CredentialsScope.GLOBAL, 'sonar-token', 'SonarQube analysis token', Secret.fromString('{{ sonar_token_value }}'))
+def existing = CredentialsProvider.lookupCredentials(StringCredentialsImpl, j, null, (List) null).find { it.id == 'sonar-token' }
+if (existing != null) { store.updateCredentials(Domain.global(), existing, sonarCred) }
+else { store.addCredentials(Domain.global(), sonarCred) }
+
+// SonarInstallation's constructor differs slightly between plugin versions, so fill it by parameter type:
+// first three Strings = name, server URL, credentials id; TriggersConfig = default; everything else null.
+def sonarCfg = j.getDescriptorByType(hudson.plugins.sonar.SonarGlobalConfiguration)
+def ctor = hudson.plugins.sonar.SonarInstallation.class.getConstructors().find { it.getAnnotation(org.kohsuke.stapler.DataBoundConstructor) }
+def strings = ['SonarQube', '{{ sonar_url }}', 'sonar-token']
+def args = ctor.parameterTypes.collect { t ->
+    if (t == String) { return strings ? strings.remove(0) : null }
+    if (t == hudson.plugins.sonar.model.TriggersConfig) { return new hudson.plugins.sonar.model.TriggersConfig() }
+    return null
+}
+sonarCfg.setInstallations(ctor.newInstance(args as Object[]))
+sonarCfg.setBuildWrapperEnabled(true)
+sonarCfg.save()
+
+if (j.getItem('cia2-pipeline') != null) { return }   // everything below is first-run only
 
 // 1. Admin user + security
 def realm = new HudsonPrivateSecurityRealm(false)
@@ -21,16 +44,11 @@ strategy.setAllowAnonymousRead(false)
 j.setAuthorizationStrategy(strategy)
 
 // 2. Credentials used by the Jenkinsfile
-def store = SystemCredentialsProvider.getInstance().getStore()
 store.addCredentials(Domain.global(), new StringCredentialsImpl(
     CredentialsScope.GLOBAL, 'k8s-host-ip', 'Kubernetes node private IP', Secret.fromString('{{ k8s_private_ip }}')))
 store.addCredentials(Domain.global(), new BasicSSHUserPrivateKey(
     CredentialsScope.GLOBAL, 'k8s-ssh-key', 'ubuntu',
     new BasicSSHUserPrivateKey.DirectEntryPrivateKeySource('''{{ ssh_key }}'''), '', 'SSH key for the Kubernetes node'))
-store.addCredentials(Domain.global(), new StringCredentialsImpl(
-    CredentialsScope.GLOBAL, 'acr-login-server', 'Azure Container Registry login server', Secret.fromString('{{ acr_server }}')))
-store.addCredentials(Domain.global(), new UsernamePasswordCredentialsImpl(
-    CredentialsScope.GLOBAL, 'acr-creds', 'Azure Container Registry login', '{{ acr_user }}', '{{ acr_password }}'))
 store.addCredentials(Domain.global(), new StringCredentialsImpl(
     CredentialsScope.GLOBAL, 'acr-login-server', 'Azure Container Registry login server', Secret.fromString('{{ acr_server }}')))
 store.addCredentials(Domain.global(), new UsernamePasswordCredentialsImpl(

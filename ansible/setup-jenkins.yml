@@ -1,7 +1,9 @@
 ---
 # Fully automated Jenkins setup: installs Jenkins, skips the setup wizard, installs plugins,
 # creates the admin user, the credentials and the pipeline job, and starts the first build.
+# Also runs SonarQube (Docker + PostgreSQL) on this VM and wires it into Jenkins (plugin, server entry, token, webhook).
 # Extra vars (from cia2-vars.json): repo_url, repo_branch, jenkins_admin_password, acr_server, acr_user, acr_password
+# Optional vars: sonar_admin_password, sonar_db_password, sonarqube_image
 - name: Configure Jenkins CI server
   hosts: jenkins
   become: true
@@ -12,7 +14,12 @@
     ssh_key_path: /home/ubuntu/.ssh/cia2-key.pem
     plugins: >-
       git workflow-aggregator github credentials-binding plain-credentials
-      ssh-credentials timestamper junit pipeline-stage-view
+      ssh-credentials timestamper junit pipeline-stage-view sonar
+    # --- SonarQube ---
+    sonarqube_image: "sonarqube:community"   # Community Build (free). Pin a tag, e.g. 25.10.0.114319-community, if you want repeatable builds
+    sonar_url: "http://localhost:9000"
+    sonar_admin_password: "Cia2@Sonar12345"  # >= 12 characters (SonarQube password policy)
+    sonar_db_password: "sonar-db-Cia2-pw"
   tasks:
     - name: Install base packages
       ansible.builtin.apt:
@@ -88,9 +95,130 @@
       delay: 10
       until: up.status in [200, 403]
 
+    # ------------------------------------------------------------------------------------------
+    # SonarQube server (runs next to Jenkins in Docker, data kept in named volumes)
+    # ------------------------------------------------------------------------------------------
+    - name: SonarQube needs a larger mmap limit (Elasticsearch)
+      ansible.builtin.shell: |
+        printf 'vm.max_map_count=524288\nfs.file-max=131072\n' > /etc/sysctl.d/99-sonarqube.conf
+        sysctl --system >/dev/null
+      changed_when: false
+
+    - name: Check for a swap file (the 4 GB VM runs Jenkins + SonarQube + builds)
+      ansible.builtin.stat:
+        path: /swapfile
+      register: swap_stat
+
+    - name: Create a 2 GB swap file
+      ansible.builtin.shell: |
+        fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+        grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+      when: not swap_stat.stat.exists
+
+    - name: Create Docker network for SonarQube
+      ansible.builtin.command: docker network create sonarnet
+      register: net
+      failed_when: net.rc != 0 and 'already exists' not in net.stderr
+      changed_when: net.rc == 0
+
+    - name: Start PostgreSQL for SonarQube
+      ansible.builtin.shell: |
+        docker inspect sonar-db >/dev/null 2>&1 && { docker start sonar-db >/dev/null; exit 0; }
+        docker run -d --name sonar-db --network sonarnet --restart unless-stopped \
+          -e POSTGRES_USER=sonar -e POSTGRES_PASSWORD='{{ sonar_db_password }}' -e POSTGRES_DB=sonar \
+          -v sonar_db:/var/lib/postgresql/data postgres:15-alpine
+      changed_when: false
+
+    - name: Start SonarQube
+      # --add-host lets SonarQube call back to the Jenkins webhook on the host (Jenkins listens on :8080 of the VM)
+      ansible.builtin.shell: |
+        docker inspect sonarqube >/dev/null 2>&1 && { docker start sonarqube >/dev/null; exit 0; }
+        docker run -d --name sonarqube --network sonarnet --restart unless-stopped \
+          --add-host host.docker.internal:host-gateway -p 9000:9000 \
+          -e SONAR_JDBC_URL=jdbc:postgresql://sonar-db:5432/sonar \
+          -e SONAR_JDBC_USERNAME=sonar -e SONAR_JDBC_PASSWORD='{{ sonar_db_password }}' \
+          -e SONAR_VALIDATEWEBHOOKS=false \
+          -e SONAR_WEB_JAVAADDITIONALOPTS=-Xmx512m -e SONAR_CE_JAVAADDITIONALOPTS=-Xmx512m -e SONAR_SEARCH_JAVAADDITIONALOPTS=-Xmx512m \
+          -v sonar_data:/opt/sonarqube/data -v sonar_extensions:/opt/sonarqube/extensions -v sonar_logs:/opt/sonarqube/logs \
+          {{ sonarqube_image }}
+      changed_when: false
+
+    - name: Wait for SonarQube to be UP (first start takes a few minutes)
+      ansible.builtin.uri:
+        url: "{{ sonar_url }}/api/system/status"
+        return_content: true
+      register: sonar_status
+      retries: 60
+      delay: 10
+      until: sonar_status.status == 200 and (sonar_status.json.status | default('')) == 'UP'
+
+    - name: Change the default SonarQube admin password (skipped if already changed)
+      ansible.builtin.uri:
+        url: "{{ sonar_url }}/api/users/change_password"
+        method: POST
+        user: admin
+        password: admin
+        force_basic_auth: true
+        body_format: form-urlencoded
+        body:
+          login: admin
+          previousPassword: admin
+          password: "{{ sonar_admin_password }}"
+        status_code: [204, 400, 401]
+      no_log: true
+
+    - name: Revoke any old Jenkins token (keeps the playbook re-runnable)
+      ansible.builtin.uri:
+        url: "{{ sonar_url }}/api/user_tokens/revoke"
+        method: POST
+        user: admin
+        password: "{{ sonar_admin_password }}"
+        force_basic_auth: true
+        body_format: form-urlencoded
+        body: { name: jenkins }
+        status_code: [204, 400, 404]
+      no_log: true
+
+    - name: Generate a SonarQube token for Jenkins
+      ansible.builtin.uri:
+        url: "{{ sonar_url }}/api/user_tokens/generate"
+        method: POST
+        user: admin
+        password: "{{ sonar_admin_password }}"
+        force_basic_auth: true
+        body_format: form-urlencoded
+        body: { name: jenkins }
+        return_content: true
+      register: sonar_token
+      no_log: true
+
+    - name: List SonarQube webhooks
+      ansible.builtin.uri:
+        url: "{{ sonar_url }}/api/webhooks/list"
+        user: admin
+        password: "{{ sonar_admin_password }}"
+        force_basic_auth: true
+        return_content: true
+      register: sonar_hooks
+      no_log: true
+
+    - name: Create the webhook that tells Jenkins when the Quality Gate is computed
+      ansible.builtin.uri:
+        url: "{{ sonar_url }}/api/webhooks/create"
+        method: POST
+        user: admin
+        password: "{{ sonar_admin_password }}"
+        force_basic_auth: true
+        body_format: form-urlencoded
+        body:
+          name: jenkins
+          url: "http://host.docker.internal:8080/sonarqube-webhook/"
+      when: "'jenkins' not in (sonar_hooks.json.webhooks | map(attribute='name') | list)"
+      no_log: true
+
     - name: Check whether plugins are already installed
       ansible.builtin.stat:
-        path: /var/lib/jenkins/plugins/workflow-aggregator.jpi
+        path: /var/lib/jenkins/plugins/sonar.jpi
       register: plugin_stat
 
     - name: Download Jenkins CLI
@@ -117,6 +245,8 @@
         mode: "0600"
       vars:
         ssh_key: "{{ lookup('file', ssh_key_path) }}"
+        sonar_token_value: "{{ sonar_token.json.token }}"
+      no_log: true
 
     - name: Restart Jenkins so plugins and init script load
       ansible.builtin.service:
@@ -128,6 +258,11 @@
         path: /var/lib/jenkins/jobs/cia2-pipeline/config.xml
         timeout: 300
 
+    - name: Give the init script time to configure SonarQube in Jenkins
+      ansible.builtin.wait_for:
+        path: /var/lib/jenkins/hudson.plugins.sonar.SonarGlobalConfiguration.xml
+        timeout: 300
+
     - name: Remove init script (it contained the SSH key)
       ansible.builtin.file:
         path: /var/lib/jenkins/init.groovy.d/01-setup.groovy
@@ -135,4 +270,4 @@
 
     - name: Done
       ansible.builtin.debug:
-        msg: "Jenkins ready at http://<jenkins-public-ip>:8080  user=admin  password={{ jenkins_admin_password }}  (first build already started)"
+        msg: "Jenkins ready at http://<jenkins-public-ip>:8080  user=admin  password={{ jenkins_admin_password }}  |  SonarQube at http://<jenkins-public-ip>:9000  user=admin  password={{ sonar_admin_password }}"
