@@ -221,6 +221,11 @@
         path: /var/lib/jenkins/plugins/sonar.jpi
       register: plugin_stat
 
+    - name: Has Jenkins been set up before? (then it requires a login for the CLI)
+      ansible.builtin.stat:
+        path: /var/lib/jenkins/jobs/cia2-pipeline/config.xml
+      register: job_stat
+
     - name: Download Jenkins CLI
       ansible.builtin.get_url:
         url: http://localhost:8080/jnlpJars/jenkins-cli.jar
@@ -229,7 +234,7 @@
       when: not plugin_stat.stat.exists
 
     - name: Install Jenkins plugins (retries until the update centre is reachable)
-      ansible.builtin.command: "java -jar /opt/jenkins-cli.jar -s http://localhost:8080/ install-plugin {{ plugins }}"
+      ansible.builtin.command: "java -jar /opt/jenkins-cli.jar -s http://localhost:8080/ {{ '-auth admin:' + jenkins_admin_password if job_stat.stat.exists else '' }} install-plugin {{ plugins }}"
       register: plug
       retries: 8
       delay: 20
