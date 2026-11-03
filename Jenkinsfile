@@ -10,7 +10,7 @@ pipeline {
     // Fires on GitHub webhook (http://<jenkins-ip>:8080/github-webhook/); pollSCM is a fallback.
     triggers {
         githubPush()
-        pollSCM('H/2 * * * *')
+        ///pollSCM('H/2 * * * *')
     }
 
     environment {
