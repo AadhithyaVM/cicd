@@ -4,7 +4,7 @@ package com.cia2.app;
 public class GreetingService {
 
     /** Title shown at the top of the application. Change this text to demo the pipeline (Deliverable 4). */
-    public static final String HEADLINE = "TaskFlow - plan your day (version 6)";
+    public static final String HEADLINE = "TaskFlow - plan your day (version 7)";
     public String greet(String name) {
         if (name == null || name.isBlank()) {
             return "Hello, World!";
